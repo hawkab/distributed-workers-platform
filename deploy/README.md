@@ -84,3 +84,33 @@ python3 deploy/configure-host.py --config deployment.local.json --check
 
 Run the same command without `--check` as root only on the intended host.
 Keep real hostnames, addresses and private configuration outside Git.
+
+## Gateway artifact storage and streaming
+
+The gateway uses `WORKER_ARTIFACT_DIR` for durable binary chunks and complete
+content-addressed objects. The provisioning default is the private `artifacts`
+subdirectory of `/var/lib/fleet-worker-gateway`; an optional `artifact_dir` in
+ignored deployment settings can select a dedicated persistent filesystem.
+That filesystem must support hard links, file/directory fsync and the service
+user's writes. Do not expose it as a web document root. Preserve the directory
+together with fleet PostgreSQL metadata when moving or restoring the service.
+
+The unit declares `StateDirectory`, an explicit writable path under
+`ProtectSystem=strict`, and `TimeoutStopSec=infinity`. The Go server drains active
+HTTP requests on SIGTERM rather than cutting an active upload off at a fixed
+deadline. Quiesce new work and check active workers before maintenance; a forced
+stop remains an explicit operator action.
+
+Only binary chunk URLs bypass `client_max_body_size`; JSON metadata still has
+the gateway's 16 MiB control budget. Upload proxying uses HTTP/1.1 with request
+buffering disabled, including chunked requests. Both device-scoped and admin
+artifact downloads disable response buffering and gzip, preserving exact bytes.
+Read/send timeouts apply to inactivity between I/O operations, not total transfer
+duration. Authentication and job/attempt ownership remain enforced by the gateway.
+
+`configure-host.py` provisions a complete dedicated host configuration. For an
+existing deployment, apply reviewed environment, unit and binary-location changes
+without rerunning the whole provisioner or replacing unrelated live locations.
+Preserve the current public Git subpath and other deliberate host differences.
+Validate nginx before reload, ensure the artifact path is writable as the service
+user, then check a chunked upload above 16 MiB and a checksum-verified download.

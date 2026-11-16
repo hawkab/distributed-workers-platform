@@ -4,6 +4,7 @@ Deployment and composition of independent components:
 
 - [gateway](https://gitflic.ru/project/distributed-workers/gateway): durable execution ledger and broker bridge.
 - [worker-android](https://gitflic.ru/project/distributed-workers/worker-android): Android executor and signed self-updates.
+- [worker-portable](https://gitflic.ru/project/distributed-workers/worker-portable): Node.js for Linux/Windows, PHP cron adapter and signed self-updates.
 - [protocol](https://gitflic.ru/project/distributed-workers/protocol): portable job and receipt formats.
 
 Use separate databases, credentials and broker resources. Do not point this deployment

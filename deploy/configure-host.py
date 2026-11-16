@@ -28,6 +28,16 @@ except (OSError, ValueError, KeyError, TypeError):
     parser.error('A private deployment configuration file with public_host is required')
 if not isinstance(public_host, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', public_host):
     parser.error('Invalid public_host in private deployment configuration')
+state_directory = Path('/var/lib/fleet-worker-gateway')
+artifact_value = deployment.get('artifact_dir', str(state_directory / 'artifacts'))
+if not isinstance(artifact_value, str) or not Path(artifact_value).is_absolute() or any(c in artifact_value for c in '\x00\r\n'):
+    parser.error('artifact_dir must be a dedicated absolute persistent directory')
+artifact_directory = Path(artifact_value).resolve()
+if artifact_directory == Path('/'):
+    parser.error('artifact_dir must be a dedicated absolute persistent directory')
+# EnvironmentFile supports quoted values. Unit path specifiers need literal %%.
+artifact_environment_value = json.dumps(str(artifact_directory), ensure_ascii=False)
+artifact_unit_path = json.dumps(str(artifact_directory).replace('%', '%%'), ensure_ascii=False)
 if args.check:
     print('Private deployment configuration is valid.')
     raise SystemExit(0)
@@ -68,9 +78,12 @@ environment.write_text(
     'WORKER_AMQP_URL=amqp://fleet_events:' + config['mq_password'] +
     '@127.0.0.1:15673/fleet-workers\n' +
     'WORKER_BIND=127.0.0.1:18220\n' +
-    'WORKER_RELEASE_DIR=/var/lib/fleet-worker-gateway/releases\n')
+    'WORKER_RELEASE_DIR=/var/lib/fleet-worker-gateway/releases\n' +
+    'WORKER_ARTIFACT_DIR=' + artifact_environment_value + '\n')
 environment.chmod(0o600)
-run('chgrp', 'fleetworker', '/var/lib/fleet-worker-gateway')
+for directory in (state_directory, state_directory / 'releases', artifact_directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run('chown', 'fleetworker:fleetworker', str(directory))
 run('chown', '-R', 'fleetworker:fleetworker', '/var/lib/fleet-worker-gateway/releases')
 
 Path('/etc/systemd/system/fleet-worker-gateway.service').write_text('''[Unit]
@@ -82,7 +95,11 @@ Wants=network-online.target
 User=fleetworker
 Group=fleetworker
 EnvironmentFile=/etc/fleet-worker-gateway/gateway.env
+StateDirectory=fleet-worker-gateway
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/fleet-worker-gateway @ARTIFACT_DIR@
 ExecStart=/opt/fleet-worker-gateway/worker-gateway
+TimeoutStopSec=infinity
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -94,7 +111,7 @@ UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-''')
+'''.replace('@ARTIFACT_DIR@', artifact_unit_path))
 
 Path('/etc/nginx/sites-available/fleet-worker-gateway.conf').write_text('''server {
  listen 80;
@@ -114,6 +131,39 @@ server {
   proxy_set_header X-Forwarded-Proto https;
   proxy_set_header X-Forwarded-For $remote_addr;
   client_max_body_size 512m;
+ }
+ # Binary upload bodies bypass the JSON budget and nginx temporary files.
+ location ~ ^/fleet/v1/artifacts/[0-9a-fA-F-]+/chunks/[0-9]+$ {
+  rewrite ^/fleet(/.*)$ $1 break;
+  proxy_pass http://127.0.0.1:18220;
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto https;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  client_max_body_size 0;
+  proxy_request_buffering off;
+  proxy_buffering off;
+  proxy_max_temp_file_size 0;
+  proxy_read_timeout 90s;
+  proxy_send_timeout 90s;
+  gzip off;
+ }
+ # Device-scoped and administrator downloads are both streamed unchanged.
+ location ~ ^/fleet/v1/(admin/)?artifacts/[0-9a-fA-F-]+/content$ {
+  rewrite ^/fleet(/.*)$ $1 break;
+  proxy_pass http://127.0.0.1:18220;
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto https;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  client_max_body_size 16m;
+  proxy_buffering off;
+  proxy_max_temp_file_size 0;
+  proxy_read_timeout 90s;
+  proxy_send_timeout 90s;
+  gzip off;
  }
  location /fleet/ {
   proxy_pass http://127.0.0.1:18220/;
