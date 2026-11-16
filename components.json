@@ -1,10 +1,10 @@
 {
   "protocol": 1,
   "components": {
-    "gateway": "v0.4.0",
-    "worker-android": "v0.4.1",
-    "protocol": "v0.4.1",
-    "platform": "v0.4.0",
-    "worker-portable": "v0.4.0"
+    "gateway": "v0.5.0",
+    "worker-android": "v0.5.0",
+    "protocol": "v0.5.0",
+    "platform": "v0.5.0",
+    "worker-portable": "v0.5.0"
   }
 }

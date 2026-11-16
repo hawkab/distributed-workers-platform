@@ -114,3 +114,9 @@ without rerunning the whole provisioner or replacing unrelated live locations.
 Preserve the current public Git subpath and other deliberate host differences.
 Validate nginx before reload, ensure the artifact path is writable as the service
 user, then check a chunked upload above 16 MiB and a checksum-verified download.
+
+Worker resource profiles use the authenticated `X-Worker-Profile` header. The
+proxy permits a large header up to the Go HTTP server's existing 1 MiB default
+capacity, rather than nginx's smaller per-header default. Small normal requests
+use the regular header buffer. The gateway validates the profile and binds it
+to the credential; a caller cannot select another worker by an ID in a header.

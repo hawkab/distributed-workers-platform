@@ -125,6 +125,8 @@ server {
  ssl_certificate /etc/fleet-worker-gateway/acme/live/@PUBLIC_HOST@/fullchain.pem;
  ssl_certificate_key /etc/fleet-worker-gateway/acme/live/@PUBLIC_HOST@/privkey.pem;
  ssl_protocols TLSv1.2 TLSv1.3;
+ # Match Go net/http DefaultMaxHeaderBytes; resource profiles are not truncated.
+ large_client_header_buffers 4 1m;
  location /git/ {
   proxy_pass http://127.0.0.1:18300/;
   proxy_set_header Host $host;
