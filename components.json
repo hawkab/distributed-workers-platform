@@ -1,9 +1,9 @@
 {
   "protocol": 1,
   "components": {
-    "gateway": "v0.3.0",
-    "worker-android": "v0.3.0",
-    "protocol": "v0.3.0",
-    "platform": "v0.3.0"
+    "gateway": "v0.3.1",
+    "worker-android": "v0.3.1",
+    "protocol": "v0.3.1",
+    "platform": "v0.3.1"
   }
 }
