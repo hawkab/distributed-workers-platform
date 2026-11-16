@@ -36,3 +36,13 @@ Credentials are resolved by a local helper and never embedded in remote URLs.
 The publisher sends the branch first and each new annotated tag as a separate
 Git receive event, so release pipelines also work on forges that do not process
 a combined first branch/tag push correctly.
+
+## Native release triggering
+
+GitHub and Gitea receive version tags as ordinary native workflow events.
+The operator-local publisher additionally checks GitFlic for an existing pipeline
+with the same project, tag and commit, then starts the native GitFlic pipeline
+through its API when needed. This handles the hosted service's missing push
+trigger without rebuilding artifacts outside GitFlic. A durable local receipt
+prevents duplicate starts; uncertain responses are reconciled before retry.
+The callback and all its credentials remain ignored and operator-local.
