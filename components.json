@@ -3,8 +3,8 @@
   "components": {
     "gateway": "v0.5.0",
     "worker-android": "v0.5.0",
-    "protocol": "v0.6.0",
-    "platform": "v0.6.0",
-    "worker-portable": "v0.6.0"
+    "protocol": "v0.6.1",
+    "platform": "v0.6.1",
+    "worker-portable": "v0.6.1"
   }
 }
