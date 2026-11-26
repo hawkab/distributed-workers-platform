@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +41,12 @@ class ArchitectureTests(unittest.TestCase):
                 self.assertEqual(len(owned), 1)
                 paths = document.findall("s:path", namespace)
                 self.assertEqual(len(paths), 13)
+
+    def test_checked_in_png_preview_matches_the_editable_svg(self):
+        raw = (ROOT / "docs/architecture.png").read_bytes()
+        self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+        expected = b"fleet-svg-sha256\x00" + hashlib.sha256((ROOT / "docs/architecture.svg").read_bytes()).hexdigest().encode()
+        self.assertIn(expected, raw)
 
 
 if __name__ == "__main__":

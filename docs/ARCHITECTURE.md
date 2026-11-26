@@ -35,24 +35,28 @@ adapter that implements the requested operation.
 
 The canonical model is [tools/render-architecture.py](../tools/render-architecture.py).
 It emits editable DOT and self-contained, accessible SVG using Python's standard
-library. Fixed positions keep the six ownership views comparable. No external
-render service, downloaded JavaScript or production setting is involved.
+library. Fixed positions keep the six ownership views comparable. A local
+Chromium browser renders the optional PNG preview. No external render service,
+downloaded JavaScript or production setting is involved.
 
 From this repository:
 
 ```sh
-python3 -B tools/render-architecture.py
+python3 -B tools/render-architecture.py --png
 # Workspace layout: WORKSPACE/repos/{platform,gateway,protocol,...}
-python3 -B tools/render-architecture.py --workspace ../..
+python3 -B tools/render-architecture.py --workspace ../.. --png
 python3 -B -m unittest discover -s tests -v
 ```
 
-Keep the generated DOT/SVG files in every repository so README rendering works
-on GitFlic, Gitea and GitHub without Mermaid/PlantUML plugins. An installation
+Keep generated DOT/SVG/PNG files in every repository. README embeds PNG because
+GitFlic serves raw SVG as text and browsers refuse it as an image; vector SVG
+and editable DOT remain linked. This works without Mermaid/PlantUML plugins.
+Each PNG contains the SHA-256 of its vector source so a stale preview is detected. An installation
 with Graphviz's full `neato` engine can also render the DOT's fixed routes with
 `neato -n2 -Tsvg docs/architecture.dot -o docs/architecture.svg`.
 
 Changes to the shared topology belong in the canonical model and must regenerate
 all views. Repository-specific implementation details belong in that README's
 boundary description. The tests compare every topology and check that each SVG
-has exactly one owned component and no active or external content.
+has exactly one owned component and no active or external content. PNG tests
+also check the binding to the current SVG source.

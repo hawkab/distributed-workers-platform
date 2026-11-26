@@ -2,9 +2,15 @@
 """Render the same UML component model with one repository's ownership highlighted."""
 import argparse
 import hashlib
+import html
 from pathlib import Path
 import re
+import shutil
+import struct
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = {
@@ -65,7 +71,32 @@ def model(component):
     return "\n".join(lines) + "\n"
 
 
-def render(component, directory):
+def render_png(source, destination, browser=None):
+    browser = browser or next((shutil.which(name) for name in ("chromium", "chromium-browser", "google-chrome") if shutil.which(name)), None)
+    if not browser:
+        raise RuntimeError("PNG previews require Chromium; supply --browser or render SVG without --png")
+    with tempfile.TemporaryDirectory(prefix="fleet-uml-") as temporary:
+        temporary = Path(temporary)
+        page = temporary / "diagram.html"
+        page.write_text('<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:white}img{display:block;width:100vw;height:100vh;object-fit:contain}</style><img src="' + html.escape(source.resolve().as_uri(), quote=True) + '">')
+        result = subprocess.run([browser, "--headless", "--disable-gpu", "--no-sandbox",
+                                 "--no-first-run", "--disable-background-networking", "--hide-scrollbars",
+                                 "--force-device-scale-factor=1", "--user-data-dir=" + str(temporary / "profile"),
+                                 "--screenshot=" + str(destination.resolve()), "--window-size=1180,890", page.as_uri()],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode:
+            raise RuntimeError("Local browser could not render the PNG preview")
+    raw = destination.read_bytes()
+    if raw[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", raw[16:24]) != (1180, 890):
+        raise RuntimeError("Unexpected PNG preview dimensions")
+    # Bind the checked-in raster preview to its exact editable vector source.
+    value = b"fleet-svg-sha256\x00" + hashlib.sha256(source.read_bytes()).hexdigest().encode()
+    chunk = b"tEXt" + value
+    chunk = struct.pack(">I", len(value)) + chunk + struct.pack(">I", zlib.crc32(chunk) & 0xffffffff)
+    destination.write_bytes(raw[:33] + chunk + raw[33:])
+
+
+def render(component, directory, png=False, browser=None):
     directory.mkdir(parents=True, exist_ok=True)
     text = model(component)
     dot = directory / "architecture.dot"
@@ -136,6 +167,8 @@ def render(component, directory):
         element(svg,"rect",x=x-len(value)*2.65-3,y=y-11,width=len(value)*5.3+6,height=15,fill="white",opacity="0.94")
         label(svg,value,x,y,size=10,color="#475569")
     (directory / "architecture.svg").write_bytes(ET.tostring(svg,encoding="utf-8",xml_declaration=True)+b"\n")
+    if png:
+        render_png(directory / "architecture.svg", directory / "architecture.png", browser)
     return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -144,6 +177,8 @@ def main():
     parser.add_argument("--component", choices=COMPONENTS, default="platform")
     parser.add_argument("--output", type=Path, default=ROOT / "docs")
     parser.add_argument("--workspace", type=Path, help="explicit workspace containing repos/<component>; render all six")
+    parser.add_argument("--png", action="store_true", help="also render forge-compatible README previews with a local Chromium browser")
+    parser.add_argument("--browser", help="optional Chromium executable for PNG previews")
     args = parser.parse_args()
     if args.workspace:
         for name in COMPONENTS:
@@ -151,9 +186,9 @@ def main():
             if not (destination / "README.md").is_file():
                 parser.error("workspace does not contain " + name)
         for name in COMPONENTS:
-            print(name, render(name, args.workspace / "repos" / name / "docs"))
+            print(name, render(name, args.workspace / "repos" / name / "docs", args.png, args.browser))
     else:
-        print(args.component, render(args.component, args.output))
+        print(args.component, render(args.component, args.output, args.png, args.browser))
 
 
 if __name__ == "__main__":
