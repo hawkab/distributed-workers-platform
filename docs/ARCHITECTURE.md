@@ -1,62 +1,87 @@
-# Shared component model
+# Two architecture views
 
-The six README diagrams are ownership views of one UML component model. Each
-view has identical nodes and relationships. Only one component's border, fill
-and explicit **THIS REPOSITORY** label change.
+The README separates runtime communication from source/package dependencies.
+Each view has one shared topology, reproduced in all six repositories with a
+repository-specific ownership highlight. `architecture.*` describes execution;
+`repositories.*` describes UML package dependencies.
 
-| Repository | Owned boundary | Shared dependency |
+## Runtime: who calls whom
+
+The primary path is application → gateway API ← worker. Both callers initiate
+HTTPS requests. A claim response carries the assigned job back to the worker;
+the gateway does not open an inbound connection to a device.
+
+1. The application submits a task with an idempotency key and requirements.
+2. The worker claims with its capabilities, resource profile and slot ID. The
+   gateway selects/locks a job in PostgreSQL and records a fenced attempt.
+3. The worker renews its lease, executes the task, streams binary chunks and
+   submits a completion. Artifact offsets and result receipts are acknowledged
+   only after their durable writes.
+4. The application reads the canonical result and any referenced artifact.
+
+PostgreSQL is the execution ledger and claim scheduler. The artifact filesystem
+holds binary chunks and sealed objects; binary bodies are not RabbitMQ messages.
+RabbitMQ is an optional integration bridge for incoming commands and outgoing
+lifecycle/result references, using the gateway's transactional inbox/outbox.
+**Workers do not consume broker queues or connect to PostgreSQL.**
+
+The worker frame contains adapter types, not an inventory of devices. Node and
+PHP are alternative engines in worker-portable; Android has its own service and
+engine. The RouterOS frame contains a local PHP SDK instance: a build/runtime
+reuse relationship, not an RPC from a router to a remote PHP host. Every slot
+retains local checkpoints and a completion outbox, separate from server storage.
+
+Blue runtime boxes identify code supplied by the current repository. The
+portable repository supplies several engines/instances, so several boxes may be
+blue. Protocol/platform have no running service to highlight; their scope is
+stated in the caption and their single package is highlighted in the second view.
+
+## Source: who owns and reuses what
+
+| Repository | Owns | Contract / reuse |
 | --- | --- | --- |
-| gateway | HTTPS API, admission, leases, canonical receipts, broker bridge, artifact/effect storage | protocol contracts; PostgreSQL, RabbitMQ, filesystem |
-| worker-portable | Node/PHP execution adapters, resource admission, durable slot state, transfers and SDK updater | gateway API and protocol ABI |
-| worker-android | Android service, Java/Rhino adapter, SQLite state, power admission and APK updater | gateway API and protocol ABI |
-| worker-routeros | Minimal ARM64 image, supervisor, mounts and image packaging | signed PHP SDK from worker-portable |
-| protocol | Wire schemas, portable ABI, examples, conformance and measurement clients | implemented by gateway and execution SDKs |
-| platform | Deployment recipes, component composition and shared release tooling | independently versioned component repositories |
+| gateway | HTTPS API, admission, fenced leases, canonical receipts, artifact/effect storage, AMQP bridge | Conforms to protocol |
+| worker-portable | Node/PHP engines, resource admission, durable slot state, transfers, SDK updater | Conforms to protocol |
+| worker-android | Android foreground service, Java/Rhino engine, SQLite state, power admission, APK updater | Conforms to protocol |
+| worker-routeros | ARM64 image, supervisor, mount contract, image packaging | Packages signed portable PHP SDK |
+| protocol | Wire schemas, portable JS ABI, examples and conformance/measurement clients | Contract, not a daemon |
+| platform | Deployment recipes, component manifests and shared release tooling | Composes versioned component releases |
 
-The application producer and result consumer are external. PostgreSQL is the
-canonical execution ledger; RabbitMQ transports durable commands and small event
-references. Binary content flows to filesystem artifact storage. A worker uses
-outgoing HTTPS and its own credential; it does not connect to PostgreSQL or AMQP.
+Dashed UML dependencies point from client to supplier. The platform's manifest
+also pins a protocol release; it is a bundle snapshot, not live device inventory.
+The package diagram shows the principal architecture dependencies rather than
+every vendored CI helper or configuration field. Component repositories keep
+their own build/release pipelines; platform is not a central build daemon.
 
-Claims are scoped by worker identity and slot. A repeated claim resumes that
-slot's live attempt. Leases and monotonically increasing fences reject stale
-canonical writes, while late output remains a candidate. Local checkpoints and
-completion outboxes survive interruptions. Lower admission pauses new work; it
-does not cancel an active computation.
+## Updates are separate from task execution
 
-Solid arrows represent runtime traffic, dashed arrows contracts or SDK reuse,
-and dotted arrows deployment/update relationships. The contract and composition
-links show principal entry points; protocol schemas also apply to all execution
-adapters. These diagrams describe logical components, not machine counts or a
-claim that every job can run on every backend. Capability matching selects an
-adapter that implements the requested operation.
+Signed update sources are **alternatives tried in order**: Gitea, GitFlic, GitHub.
+There is no provider-to-provider task or update connection. The SDK/APK updater
+checks signatures and version floors, and installs at a safe point after active
+slots/outboxes have drained. Android also validates the APK signing certificate.
 
-## Editing and rendering
+RouterOS image replacement is an operator-controlled deployment operation. The
+PHP SDK inside that image can update independently through its signed runtime
+chain. A signed image in a release does not imply automatic container replacement.
+
+## Regeneration and verification
 
 The canonical model is [tools/render-architecture.py](../tools/render-architecture.py).
-It emits editable DOT and self-contained, accessible SVG using Python's standard
-library. Fixed positions keep the six ownership views comparable. A local
-Chromium browser renders the optional PNG preview. No external render service,
-downloaded JavaScript or production setting is involved.
-
-From this repository:
+It defines named components and typed links once, and emits two SVG/DOT views
+per repository. Routes are orthogonal and captions use distinct semantics for
+calls, optional broker messages and package dependencies. SVG generation uses
+Python's standard library. Local Chromium and Pillow render PNG at native scale;
+PNG contains its vector source hash to detect stale previews. No diagram server
+or production configuration is required.
 
 ```sh
 python3 -B tools/render-architecture.py --png
-# Workspace layout: WORKSPACE/repos/{platform,gateway,protocol,...}
+# Workspace contains repos/{platform,gateway,protocol,...}
 python3 -B tools/render-architecture.py --workspace ../.. --png
 python3 -B -m unittest discover -s tests -v
 ```
 
-Keep generated DOT/SVG/PNG files in every repository. README embeds PNG because
-GitFlic serves raw SVG as text and browsers refuse it as an image; vector SVG
-and editable DOT remain linked. This works without Mermaid/PlantUML plugins.
-Each PNG contains the SHA-256 of its vector source so a stale preview is detected. An installation
-with Graphviz's full `neato` engine can also render the DOT's fixed routes with
-`neato -n2 -Tsvg docs/architecture.dot -o docs/architecture.svg`.
-
-Changes to the shared topology belong in the canonical model and must regenerate
-all views. Repository-specific implementation details belong in that README's
-boundary description. The tests compare every topology and check that each SVG
-has exactly one owned component and no active or external content. PNG tests
-also check the binding to the current SVG source.
+PNG is embedded in README because GitFlic serves raw SVG as text. SVG/DOT remain
+linked for editing and scaling. Tests check both topology families, call and
+reuse directions, valid box/route geometry, SVG safety, ownership and preview
+source hashes. Edit the common model and regenerate every view together.

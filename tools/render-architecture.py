@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Render the same UML component model with one repository's ownership highlighted."""
+"""Generate separate runtime and UML repository views from one shared model."""
 import argparse
+from dataclasses import dataclass, field
 import hashlib
 import html
+import json
 from pathlib import Path
-import re
 import shutil
 import struct
 import subprocess
@@ -14,182 +15,232 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = {
-    "gateway": ("Gateway", "HTTPS API | admission & leases | durable receipts"),
-    "worker-portable": ("Portable worker", "Node.js / PHP | execution slots | checkpoint & outbox"),
-    "worker-android": ("Android worker", "foreground service | execution slots | SQLite & updater"),
-    "worker-routeros": ("RouterOS adapter", "ARM64 container | PHP SDK supervisor | persistent mounts"),
-    "protocol": ("Protocol", "JSON Schemas | portable JS ABI | effect & artifact contracts"),
-    "platform": ("Platform", "deployment recipes | component composition | release CI tools"),
+    'gateway': 'HTTPS API, durable scheduling and result storage',
+    'worker-portable': 'Node and PHP execution engines',
+    'worker-android': 'Android service and execution engine',
+    'worker-routeros': 'Container packaging and supervision of the PHP engine',
+    'protocol': 'Wire contracts and examples; no running service',
+    'platform': 'Deployment recipes and release bundles; no running service',
 }
 
+@dataclass
+class Box:
+    id: str
+    title: str
+    lines: tuple
+    x: int
+    y: int
+    w: int
+    h: int
+    kind: str = 'component'
+    owner: str = ''
+    parent: str = ''
 
-def model(component):
-    # Fixed positions make ownership variants comparable and keep the SVG legible
-    # at README width. Coordinates and routes are part of the editable DOT source.
-    lines = [
-        '// Generated from platform/tools/render-architecture.py.',
-        '// Render with neato -n2 -Tsvg architecture.dot -o architecture.svg.',
-        'digraph Fleet {',
-        'graph [layout=neato, bgcolor="white", pad="0.25", splines=true, overlap=true,',
-        'fontname="DejaVu Sans", fontsize=18, label="Distributed Workers — UML components", labelloc=t];',
-        'node [shape=component, style="filled", fillcolor="#f1f4f8", color="#8391a5",',
-        'fontcolor="#334155", fontname="DejaVu Sans", fontsize=12, width=3.1, height=1.35, fixedsize=true];',
-        'edge [color="#64748b", fontcolor="#475569", fontname="DejaVu Sans", fontsize=10, arrowsize=0.7];',
+@dataclass
+class Link:
+    source: str
+    target: str
+    points: tuple
+    label: tuple
+    label_at: tuple
+    kind: str = 'call'
+
+@dataclass
+class Diagram:
+    title: str
+    width: int
+    height: int
+    boxes: list = field(default_factory=list)
+    links: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+
+
+def runtime():
+    d = Diagram('How a task runs — runtime components', 1140, 800)
+    d.boxes = [
+        Box('canonical', 'Gateway and canonical stores', (), 350, 135, 455, 520, 'group'),
+        Box('workers', 'Compatible execution hosts', (), 835, 130, 280, 410, 'group'),
+        Box('application', 'External application', ('Creates tasks', 'Reads results and artifacts'), 25, 210, 235, 105, 'external'),
+        Box('api', 'Gateway HTTPS API', ('Assigns attempts and leases', 'Accepts results / binary chunks', 'Authenticates each participant'), 425, 205, 245, 140, owner='gateway', parent='canonical'),
+        Box('postgres', 'PostgreSQL', ('Jobs, attempts, receipts', 'Inbox / outbox metadata'), 385, 520, 205, 100, 'store', parent='canonical'),
+        Box('artifacts', 'Artifact filesystem', ('Chunks and sealed files', 'Content hashes'), 610, 520, 185, 100, 'store', parent='canonical'),
+        Box('broker', 'RabbitMQ — optional bridge', ('Command ingestion / event refs', 'Workers do not claim here'), 30, 520, 270, 100, 'external'),
+        Box('node', 'Node worker', ('Linux / Windows',), 850, 175, 250, 48, owner='worker-portable', parent='workers'),
+        Box('php', 'PHP CLI worker', ('Linux / shared hosting',), 850, 232, 250, 48, owner='worker-portable', parent='workers'),
+        Box('android', 'Android service', ('Java / Rhino',), 850, 289, 250, 48, owner='worker-android', parent='workers'),
+        Box('router', 'RouterOS container', (), 850, 348, 250, 117, 'group', 'worker-routeros', 'workers'),
+        Box('router_php', 'PHP execution engine', ('Same portable SDK',), 864, 390, 222, 53, owner='worker-portable', parent='router'),
+        Box('source', 'External HTTP source', ('Only for network tasks',), 850, 620, 250, 85, 'external'),
     ]
-    positions = {"protocol": (170, 760), "platform": (550, 760), "gateway": (550, 540),
-                 "worker-portable": (170, 260), "worker-android": (550, 260), "worker-routeros": (930, 260)}
-    for name, (title, detail) in COMPONENTS.items():
-        selected = name == component
-        marker = "THIS REPOSITORY" if selected else "other repository"
-        label = title + "\\n" + marker + "\\n" + name + "\\n" + detail.replace(" | ", "\\n")
-        attrs = 'fillcolor="#e7f0ff", color="#2058ad", fontcolor="#133d78", penwidth=2.5, ' if selected else ''
-        x, y = positions[name]
-        lines.append('"' + name + '" [' + attrs + 'pos="' + str(x) + ',' + str(y) + '!", label="' + label + '"];')
-    lines += [
-        'application [shape=box, pos="170,540!", height=0.8, fillcolor="#fffaf0", label="External application\\nsubmit jobs / consume results"];',
-        'infrastructure [shape=box3d, pos="930,540!", height=1.5, label="Durable infrastructure\\nPostgreSQL: canonical ledger\\nRabbitMQ: commands + references\\nFilesystem: sealed artifacts"];',
-        'source [shape=box, pos="170,45!", height=0.8, fillcolor="#fffaf0", label="External HTTP source\\noperator-selected data"];',
-        'releases [shape=folder, pos="930,760!", height=0.8, label="Signed release mirrors\\nGitea → GitFlic → GitHub"];',
-        'legend [shape=plain, pos="690,20!", label="Blue + THIS REPOSITORY = owned here\\nGrey = another repository / external infrastructure\\nSolid: runtime   Dashed: contract or reuse   Dotted: deployment/update"];',
+    d.links = [
+        Link('application', 'api', ((260,268),(425,268)), ('1  Submit task','4  Read result'), (342,224)),
+        Link('workers', 'api', ((835,268),(670,268)), ('2  Claim (reply: job)','3  Report / upload'), (753,224)),
+        Link('api','postgres',((480,345),(480,520)),('SQL transactions',),(480,440)),
+        Link('api','artifacts',((620,345),(705,345),(705,520)),('Binary chunks',),(705,440)),
+        Link('api','broker',((425,310),(360,310),(360,470),(220,470),(220,520)),('Event refs / outbox',),(235,450),'optional'),
+        Link('broker','api',((110,520),(110,385),(398,385),(398,292),(425,292)),('Commands / inbox',),(240,370),'optional'),
+        Link('workers','source',((975,540),(975,620)),('GET / HEAD',),(1050,580)),
     ]
-    def edge(a, b, route, label, lp, style="solid", both=False):
-        lines.append('"' + a + '" -> "' + b + '" [style=' + style + ', pos="' + route + '", label="' + label + '", lp="' + lp + '"' + (', dir=both' if both else '') + '];')
-    edge("application", "gateway", "e,435,540 284,540 330,540 380,540 428,540", "HTTPS", "360,557")
-    edge("gateway", "infrastructure", "e,815,540 665,540 710,540 765,540 808,540", "transactions / streams", "740,557")
-    edge("worker-portable", "gateway", "e,500,489 170,310 170,410 500,395 500,482", "outbound HTTPS: claim / heartbeat / result", "320,408", both=True)
-    edge("worker-android", "gateway", "e,550,489 550,310 550,365 550,425 550,482", "outbound HTTPS", "625,390", both=True)
-    edge("worker-routeros", "worker-portable", "e,284,260 930,209 930,135 300,135 291,260", "reuses PHP SDK", "550,155", "dashed")
-    edge("worker-portable", "source", "e,170,77 170,209 170,165 170,120 170,84", "HTTP stream", "106,140")
-    edge("worker-android", "source", "e,286,45 500,209 500,95 340,45 293,45", "HTTP stream", "390,90")
-    edge("protocol", "gateway", "e,490,591 170,709 170,665 490,660 490,598", "wire contract", "330,665", "dashed")
-    edge("platform", "gateway", "e,550,591 550,709 550,675 550,630 550,598", "deployment recipes", "640,651", "dotted")
-    edge("platform", "releases", "e,815,760 665,760 715,760 760,760 808,760", "release composition", "740,778", "dotted")
-    edge("releases", "worker-routeros", "e,1045,260 1045,760 1110,760 1110,260 1052,260", "signed image", "1060,620", "dotted")
-    edge("releases", "worker-portable", "e,80,310 815,729 730,670 20,670 20,670 20,580 20,310 73,310", "signed SDK updates", "65,655", "dotted")
-    edge("releases", "worker-android", "e,665,280 815,729 760,680 760,380 672,284", "signed APK updates", "780,420", "dotted")
-    lines.append('}')
-    return "\n".join(lines) + "\n"
+    d.notes = [
+        (975, 492, ('Per-slot checkpoint + completion outbox', 'Local JSON state / SQLite'), 12),
+        (570, 729, ('HTTPS arrows point from caller to service; replies use the same connection.',), 14),
+        (570, 755, ('Dashed broker links: optional AMQP commands and event references.',), 13),
+        (570, 784, ('Workers never connect directly to PostgreSQL or RabbitMQ.',), 15),
+    ]
+    return d
 
 
-def render_png(source, destination, browser=None):
-    browser = browser or next((shutil.which(name) for name in ("chromium", "chromium-browser", "google-chrome") if shutil.which(name)), None)
-    if not browser:
-        raise RuntimeError("PNG previews require Chromium; supply --browser or render SVG without --png")
-    with tempfile.TemporaryDirectory(prefix="fleet-uml-") as temporary:
-        temporary = Path(temporary)
-        page = temporary / "diagram.html"
-        page.write_text('<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:white}img{display:block;width:100vw;height:100vh;object-fit:contain}</style><img src="' + html.escape(source.resolve().as_uri(), quote=True) + '">')
-        result = subprocess.run([browser, "--headless", "--disable-gpu", "--no-sandbox",
-                                 "--no-first-run", "--disable-background-networking", "--hide-scrollbars",
-                                 "--force-device-scale-factor=1", "--user-data-dir=" + str(temporary / "profile"),
-                                 "--screenshot=" + str(destination.resolve()), "--window-size=1180,890", page.as_uri()],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode:
-            raise RuntimeError("Local browser could not render the PNG preview")
-    raw = destination.read_bytes()
-    if raw[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", raw[16:24]) != (1180, 890):
-        raise RuntimeError("Unexpected PNG preview dimensions")
-    # Bind the checked-in raster preview to its exact editable vector source.
-    value = b"fleet-svg-sha256\x00" + hashlib.sha256(source.read_bytes()).hexdigest().encode()
-    chunk = b"tEXt" + value
-    chunk = struct.pack(">I", len(value)) + chunk + struct.pack(">I", zlib.crc32(chunk) & 0xffffffff)
-    destination.write_bytes(raw[:33] + chunk + raw[33:])
+def repositories():
+    d = Diagram('Where the repository fits — UML package dependencies',1080,710)
+    d.boxes = [
+        Box('implementations','Runtime code',(),35,260,1010,190,'group'),
+        Box('protocol','protocol',('JSON Schemas / portable JS ABI','Contract, not a service'),410,100,260,115,'package','protocol'),
+        Box('gateway','gateway',('API, leases, canonical results',),60,310,260,120,'package','gateway','implementations'),
+        Box('worker-portable','worker-portable',('Node / PHP SDKs',),410,310,260,120,'package','worker-portable','implementations'),
+        Box('worker-android','worker-android',('Android service / executor',),760,310,260,120,'package','worker-android','implementations'),
+        Box('platform','platform',('Deployment recipes / release pins','Includes protocol version pin'),60,545,260,115,'package','platform'),
+        Box('worker-routeros','worker-routeros',('ARM64 image / supervisor','Packages the PHP SDK locally'),760,545,260,115,'package','worker-routeros'),
+    ]
+    d.links = [
+        Link('gateway','protocol',((190,310),(190,155),(410,155)),('conforms to contract',),(285,140),'dependency'),
+        Link('worker-portable','protocol',((540,310),(540,215)),('contract',),(585,251),'dependency'),
+        Link('worker-android','protocol',((890,310),(890,155),(670,155)),('conforms to contract',),(790,140),'dependency'),
+        Link('platform','implementations',((190,545),(190,450)),('composes releases',),(275,500),'dependency'),
+        Link('worker-routeros','worker-portable',((890,545),(890,490),(640,490),(640,430)),('packages PHP SDK',),(775,476),'dependency'),
+    ]
+    d.notes = [(540,692,('Dashed arrows point from user to supplier; they are not network connections.',),14)]
+    return d
 
 
-def render(component, directory, png=False, browser=None):
-    directory.mkdir(parents=True, exist_ok=True)
-    text = model(component)
-    dot = directory / "architecture.dot"
-    dot.write_text(text)
-    # The fixed-layout SVG needs only Python. DOT is also supplied for Graphviz
-    # users; neither a renderer server nor a network request is required.
-    namespace = "http://www.w3.org/2000/svg"
-    ET.register_namespace("", namespace)
-    def element(parent, name, **attrs):
-        return ET.SubElement(parent, "{" + namespace + "}" + name, {k.replace("_", "-"): str(v) for k, v in attrs.items()})
-    svg = ET.Element("{" + namespace + "}svg", {"viewBox": "0 0 1180 890", "width": "1180", "height": "890", "role": "img", "aria-labelledby": "title desc"})
-    element(svg, "title", id="title").text = "Distributed Workers UML — " + component
-    element(svg, "desc", id="desc").text = "Six shared components; this repository is blue and explicitly labelled. Solid runtime links, dashed contracts or reuse, dotted deployment or updates."
-    element(svg, "rect", x=0, y=0, width=1180, height=890, fill="white")
-    defs = element(svg, "defs")
-    for name, path, ref in [("arrow", "M0,-4 L8,0 L0,4 Z", 8), ("back", "M8,-4 L0,0 L8,4 Z", 0)]:
-        marker = element(defs, "marker", id=name, viewBox="0 -5 10 10", refX=ref, refY=0, markerWidth=7, markerHeight=7, orient="auto")
-        element(marker, "path", d=path, fill="#64748b")
-    def point(x, y):
-        return float(x) + 25, 840 - float(y)
-    def attribute(line, key, default=None):
-        match = re.search(r'\b' + key + r'="([^"]*)"', line)
-        return match.group(1) if match else default
-    def label(parent, value, x, y, size=12, color="#334155", weight="normal"):
-        parts = value.split("\\n")
-        text = element(parent, "text", x=x, y=y - (len(parts)-1)*8, fill=color, font_family="DejaVu Sans, sans-serif", font_size=size, text_anchor="middle", font_weight=weight)
-        for index, part in enumerate(parts):
-            element(text, "tspan", x=x, dy=0 if index==0 else 16).text = part
-    label(svg, "Distributed Workers — UML component architecture", 590, 24, size=18, weight="bold")
-    edges = [line for line in text.splitlines() if ' -> ' in line]
-    nodes = [line for line in text.splitlines() if 'pos="' in line and ' -> ' not in line]
-    for line in edges:
-        raw = attribute(line, "pos").split()
-        ending = point(*raw[0].split(",")[1:])
-        coordinates = [point(*item.split(",")) for item in raw[1:]]
-        path = "M %g,%g" % coordinates[0]
-        for offset in range(1, len(coordinates), 3):
-            path += " C %g,%g %g,%g %g,%g" % (*coordinates[offset], *coordinates[offset+1], *coordinates[offset+2])
-        path += " L %g,%g" % ending
-        style = re.search(r'style=(\w+)', line).group(1)
-        attrs = {"d": path, "fill": "none", "stroke": "#64748b", "stroke_width": 1.4, "marker_end": "url(#arrow)"}
-        if style != "solid":
-            attrs["stroke_dasharray"] = "7 5" if style == "dashed" else "2 5"
-        if "dir=both" in line:
-            attrs["marker_start"] = "url(#back)"
-        element(svg, "path", **attrs)
-    for line in nodes:
-        name = line.split(" [", 1)[0].strip('"')
-        x, y = point(*attribute(line, "pos").rstrip("!").split(","))
-        value = attribute(line, "label")
-        if 'shape=plain' in line:
-            label(svg, value, x, y, size=11)
-            continue
-        selected = name == component
-        height = float(re.search(r'height=([.\d]+)', line).group(1))*72 if 'height=' in line else 97.2
-        width = 223.2
-        element(svg, "rect", x=x-width/2, y=y-height/2, width=width, height=height, rx=2,
-                fill="#e7f0ff" if selected else attribute(line,"fillcolor","#f1f4f8"),
-                stroke="#2058ad" if selected else "#8391a5", stroke_width=2.5 if selected else 1)
-        if name in COMPONENTS:
-            for dy in (-10, 5):
-                element(svg,"rect",x=x-width/2-5,y=y-height/2+12+dy,width=10,height=7,
-                        fill="#e7f0ff" if selected else "#f1f4f8",stroke="#2058ad" if selected else "#8391a5")
-        label(svg, value, x, y+4, color="#133d78" if selected else "#334155")
-    for line in edges:
-        x, y = point(*attribute(line,"lp").split(","))
-        value = attribute(line,"label")
-        element(svg,"rect",x=x-len(value)*2.65-3,y=y-11,width=len(value)*5.3+6,height=15,fill="white",opacity="0.94")
-        label(svg,value,x,y,size=10,color="#475569")
-    (directory / "architecture.svg").write_bytes(ET.tostring(svg,encoding="utf-8",xml_declaration=True)+b"\n")
-    if png:
-        render_png(directory / "architecture.svg", directory / "architecture.png", browser)
-    return hashlib.sha256(text.encode()).hexdigest()
+def scene(view):
+    return runtime() if view == 'runtime' else repositories()
+
+
+def model(component,view='runtime'):
+    """Editable Graphviz source of the same semantic model used by the SVG."""
+    d=scene(view); lines=['// Shared model: platform/tools/render-architecture.py', 'digraph Architecture {', 'graph [rankdir=TB, compound=true];', 'node [fontname="sans-serif"];']
+    lines.append('label='+json.dumps(d.title+'\n'+component+': '+COMPONENTS[component])+';labelloc=t;')
+    def name(identifier):return json.dumps(identifier)
+    def emit(box,indent=''):
+        selected=box.owner==component
+        if box.kind=='group':
+            lines.append(indent+'subgraph '+name('cluster_'+box.id)+' {')
+            lines.append(indent+'label='+json.dumps(box.title)+'; style=dashed;')
+            if selected:lines.append(indent+'color="#2058ad";penwidth=2.5;')
+            lines.append(indent+name('anchor_'+box.id)+' [shape=point,width=0,style=invis];')
+            for child in d.boxes:
+                if child.parent==box.id:emit(child,indent+'  ')
+            lines.append(indent+'}')
+        else:
+            shape={'package':'tab','store':'cylinder','external':'box'}.get(box.kind,'component')
+            label='\n'.join([box.title,*box.lines]+(['THIS REPOSITORY']if selected and view=='repositories'else[]))
+            attrs='shape='+shape+',label='+json.dumps(label)
+            if selected:attrs+=',color="#2058ad",style=filled,fillcolor="#e8f0ff",penwidth=2.5'
+            lines.append(indent+name(box.id)+' ['+attrs+'];')
+    for box in d.boxes:
+        if not box.parent:emit(box)
+    by_id={b.id:b for b in d.boxes}
+    for edge in d.links:
+        attrs=['label='+json.dumps(' / '.join(edge.label))]
+        if edge.kind in ['dependency','optional']:attrs+=['style=dashed']
+        if edge.kind=='dependency':attrs+=['arrowhead=open']
+        ids=[]
+        for side,identifier in [('tail',edge.source),('head',edge.target)]:
+            grouped=by_id[identifier].kind=='group';ids.append(name('anchor_'+identifier if grouped else identifier))
+            if grouped:attrs.append('l'+side+'='+json.dumps('cluster_'+identifier))
+        lines.append(' -> '.join(ids)+' ['+','.join(attrs)+'];')
+    return '\n'.join(lines+['}'])+'\n'
+
+
+def svg(component,view):
+    d=scene(view);ns='http://www.w3.org/2000/svg';ET.register_namespace('',ns)
+    root=ET.Element('{'+ns+'}svg',{'viewBox':f'0 0 {d.width} {d.height}','width':str(d.width),'height':str(d.height),'role':'img','aria-labelledby':'title description'})
+    def el(parent,tag,**attrs):return ET.SubElement(parent,'{'+ns+'}'+tag,{k.replace('_','-'):str(v)for k,v in attrs.items()})
+    el(root,'title',id='title').text=d.title+' — '+component
+    el(root,'desc',id='description').text=COMPONENTS[component]
+    el(root,'rect',x=0,y=0,width=d.width,height=d.height,fill='white')
+    defs=el(root,'defs')
+    for kind,path,fill in [('call','M0,-4 L8,0 L0,4 Z','#52657d'),('dependency','M0,-4 L8,0 L0,4','none')]:
+        marker=el(defs,'marker',id=kind,viewBox='-1 -5 11 10',refX=8,refY=0,markerWidth=8,markerHeight=8,orient='auto')
+        el(marker,'path',d=path,fill=fill,stroke='#52657d',stroke_width=1.3)
+    def text(parent,x,y,parts,size=15,bold=False,color='#18314d',background=False):
+        if background:
+            w=max(map(len,parts))*size*.53+12
+            el(parent,'rect',x=x-w/2,y=y-size+1,width=w,height=len(parts)*(size+5)+4,fill='white',opacity='.96')
+        node=el(parent,'text',x=x,y=y,font_family='DejaVu Sans, sans-serif',font_size=size,text_anchor='middle',font_weight='bold'if bold else 'normal',fill=color)
+        for i,value in enumerate(parts):el(node,'tspan',x=x,dy=0 if i==0 else size+5).text=value
+    text(root,d.width/2,30,(d.title,),24,True)
+    note=component+' — '+COMPONENTS[component]
+    text(root,d.width/2,64,(note,),14,False,'#2058ad')
+    # Frames first, then connections, then readable nodes/labels.
+    for box in d.boxes:
+        if box.kind!='group':continue
+        owned=box.owner==component
+        group=el(root,'g',id=box.id,data_owner=box.owner,data_owned=str(owned).lower())
+        el(group,'rect',x=box.x,y=box.y,width=box.w,height=box.h,rx=5,fill='#f7faff',stroke='#2058ad'if owned else '#b4c0ce',stroke_width=2.5 if owned else 1.2,stroke_dasharray='none'if owned else '6 4')
+        text(group,box.x+85 if box.id=='implementations' else box.x+box.w/2,box.y+23,(box.title,),14,True)
+    for i,link in enumerate(d.links):
+        attrs={'d':'M '+' L '.join(f'{x},{y}'for x,y in link.points),'fill':'none','stroke':'#52657d','stroke_width':1.7,'marker_end':'url(#'+('dependency'if link.kind=='dependency'else'call')+')','data_source':link.source,'data_target':link.target,'data_kind':link.kind}
+        if link.kind in ['dependency','optional']:attrs['stroke_dasharray']='7 5'
+        el(root,'path',**attrs)
+    for box in d.boxes:
+        if box.kind=='group':continue
+        owned=box.owner==component
+        group=el(root,'g',id=box.id,data_owner=box.owner,data_owned=str(owned).lower())
+        bg='#e8f0ff'if owned else '#fffaf0'if box.kind=='external'else'#f2f5f9'
+        border='#2058ad'if owned else'#8799ae'
+        el(group,'rect',x=box.x,y=box.y,width=box.w,height=box.h,rx=3,fill=bg,stroke=border,stroke_width=2.5 if owned else 1.2)
+        if box.kind=='component':
+            for offset in [7,21]:el(group,'rect',x=box.x-5,y=box.y+offset,width=10,height=7,fill=bg,stroke=border)
+        if box.kind=='package':
+            el(group,'path',d=f'M {box.x},{box.y} v -12 h 75 l 10,12',fill=bg,stroke=border,stroke_width=1.2)
+        if box.kind=='store':el(group,'ellipse',cx=box.x+box.w/2,cy=box.y+8,rx=box.w/2,ry=8,fill=bg,stroke=border)
+        compact=box.h<65;title_y=box.y+(20 if compact else 34)
+        text(group,box.x+box.w/2,title_y,(box.title,),15,True)
+        if box.lines:text(group,box.x+box.w/2,title_y+(19 if compact else 27),box.lines,13 if compact else 14)
+        if view=='repositories'and owned:text(group,box.x+box.w/2,box.y+box.h-11,('THIS REPOSITORY',),12,True,'#2058ad')
+    for link in d.links:text(root,*link.label_at,link.label,12,background=True)
+    for x,y,parts,size in d.notes:text(root,x,y,parts,size)
+    return ET.tostring(root,encoding='utf-8',xml_declaration=True)+b'\n'
+
+
+def render_png(source,destination,browser=None):
+    from PIL import Image
+    browser=browser or next((shutil.which(x)for x in ['chromium','chromium-browser','google-chrome']if shutil.which(x)),None)
+    if not browser:raise RuntimeError('PNG rendering needs local Chromium; use --browser or render SVG only')
+    tree=ET.fromstring(source.read_bytes());w,h=map(int,(tree.get('width'),tree.get('height')))
+    with tempfile.TemporaryDirectory(prefix='fleet-uml-')as temporary:
+        temporary=Path(temporary);page=temporary/'view.html'
+        page.write_text(f'<!doctype html><meta charset="utf-8"><style>html,body{{margin:0;background:white;overflow:hidden}}img{{display:block;width:{w}px;height:{h}px}}</style><img src="'+html.escape(source.resolve().as_uri(),quote=True)+'">')
+        out=subprocess.run([browser,'--headless','--disable-gpu','--no-sandbox','--no-first-run','--disable-background-networking','--hide-scrollbars','--force-device-scale-factor=1','--user-data-dir='+str(temporary/'profile'),'--screenshot='+str(destination.resolve()),f'--window-size={w},{h+180}',page.as_uri()],capture_output=True)
+        if out.returncode:raise RuntimeError('Local diagram renderer failed')
+        # Render at native SVG scale; discard only the extra browser canvas.
+        with Image.open(destination)as image:image.crop((0,0,w,h)).save(destination)
+    raw=destination.read_bytes();value=b'fleet-svg-sha256\x00'+hashlib.sha256(source.read_bytes()).hexdigest().encode();chunk=b'tEXt'+value
+    chunk=struct.pack('>I',len(value))+chunk+struct.pack('>I',zlib.crc32(chunk)&0xffffffff)
+    destination.write_bytes(raw[:33]+chunk+raw[33:])
+
+
+def render(component,directory,png=False,browser=None):
+    directory.mkdir(parents=True,exist_ok=True);hashes={}
+    for view,stem in [('runtime','architecture'),('repositories','repositories')]:
+        dot=model(component,view);(directory/(stem+'.dot')).write_text(dot)
+        source=directory/(stem+'.svg');source.write_bytes(svg(component,view))
+        if png:render_png(source,directory/(stem+'.png'),browser)
+        hashes[view]=hashlib.sha256(source.read_bytes()).hexdigest()
+    return hashes
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--component", choices=COMPONENTS, default="platform")
-    parser.add_argument("--output", type=Path, default=ROOT / "docs")
-    parser.add_argument("--workspace", type=Path, help="explicit workspace containing repos/<component>; render all six")
-    parser.add_argument("--png", action="store_true", help="also render forge-compatible README previews with a local Chromium browser")
-    parser.add_argument("--browser", help="optional Chromium executable for PNG previews")
-    args = parser.parse_args()
-    if args.workspace:
-        for name in COMPONENTS:
-            destination = args.workspace / "repos" / name
-            if not (destination / "README.md").is_file():
-                parser.error("workspace does not contain " + name)
-        for name in COMPONENTS:
-            print(name, render(name, args.workspace / "repos" / name / "docs", args.png, args.browser))
-    else:
-        print(args.component, render(args.component, args.output, args.png, args.browser))
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--component',choices=COMPONENTS,default='platform');parser.add_argument('--output',type=Path,default=ROOT/'docs')
+    parser.add_argument('--workspace',type=Path);parser.add_argument('--png',action='store_true');parser.add_argument('--browser')
+    args=parser.parse_args()
+    names=list(COMPONENTS)if args.workspace else[args.component]
+    for name in names:
+        if args.workspace and not(args.workspace/'repos'/name/'README.md').is_file():parser.error('workspace lacks '+name)
+    for name in names:
+        destination=args.workspace/'repos'/name/'docs'if args.workspace else args.output
+        print(name,json.dumps(render(name,destination,args.png,args.browser)),flush=True)
 
-
-if __name__ == "__main__":
-    main()
+if __name__=='__main__':main()
